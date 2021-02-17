@@ -4,6 +4,9 @@ variables:
 stages:
     - build
 
+before_script:
+  - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY
+
 "Build docker images":
   stage: build
   tags:
