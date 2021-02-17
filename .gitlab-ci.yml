@@ -1,15 +1,18 @@
 variables:
-    DOCKER_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    DOCKER_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
 
 stages:
     - build
+
+before_script:
+  - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY
 
 "Build docker images":
   stage: build
   tags:
     - docker-socket
   only:
-    - master
+    - tags
   script:
     - docker build -t $DOCKER_IMAGE .
     - docker push $DOCKER_IMAGE
