@@ -1,9 +1,10 @@
 #!/usr/bin/python3
 
-from prometheus_client import MetricsHandler, Counter
+from prometheus_client import MetricsHandler, Counter, Gauge, Histogram, Summary
 import json
 from http.server import HTTPServer
 from urllib.parse import urlparse
+from argparse import ArgumentParser
 import configparser
 import logging
 import os
@@ -12,49 +13,85 @@ import os
 class DovecotMetricsHandler(object):
     __instance = None
 
-    def __init__(self) -> None:
-        pass
-
-    @classmethod
-    def getInstance(cls):
-        if not cls.__instance:
-            cls.__instance = DovecotMetricsHandler
-        return cls.__instance
-
-    """
-    def prepare_metric(self, event):
-        event_name = event['event']
-        fields = event['fields']
-
-        user = fields['user']
-        if event_name.contains('imap'):
-            reply_status = fields['tagged_reply_state']
-            bytes_in = fields['bytes_in']
-            bytes_out = fields['bytes_out']
-            running_usecs = fields['running_usecs']
-            cmd_name = fields['cmd_name']
-        else:
-            user = fields['user']
-            message_size = fields['message_size']
-    """
-
-class DovecotHTTPHandler(MetricsHandler):
-    helper = DovecotMetricsHandler.getInstance()
-
     # group of IMAP metrics and thing connected with it
     imap_complete_commands = Counter('dovecot_imap_commands_finished', 'Complete IMAP dovecot commands', ['user', 'reply_state'])
     imap_bytes_in = Counter('dovecot_imap_bytes_in', 'Dovecot IMAP bytes in', labelnames=['user'])
     imap_bytes_out = Counter('dovecot_imap_bytes_out', 'Dovecot IMAP bytes out', labelnames=['user'])
-    imap_running_usecs = Counter('dovecot_imap_running_usecs', 'Dovecot IMAP usecs was spent by IMAP cmd', labelnames=['user', 'cmd_name'])
+    imap_running_usecs = Counter('dovecot_imap_running_usecs', 'Dovecot IMAP usecs was spent by IMAP cmd', ['user', 'cmd_name'])
 
     # group of local delivery(LMTP) metrics
     lmtp_complete_commands = Counter('dovecot_mail_delivery_finished', 'Complete LMTP dovecot commands ', ['user'])
     lmtp_received_messages_size = Counter('dovecot_mail_delivery_messages_size', 'Received LMTP messages size ', ['user'])
 
+    def __new__(cls):
+        if not hasattr(cls, 'instance'):
+            cls.instance = super(DovecotMetricsHandler, cls).__new__(cls)
+        return cls.instance
+
+    def auth_handler(self, json_data):
+        logging.info("Within handler {}: {}".format(self.auth_handler.__name__, json_data))
+        pass
+
+    def imap_handler(self, json_data):
+        logging.info("Within handler {}: {}".format(self.imap_handler.__name__, json_data))
+        fields = json_data['fields']
+
+        user = fields['user']
+        reply_state = fields['tagged_reply_state']
+        bytes_in = fields['bytes_in']
+        bytes_out = fields['bytes_out']
+        running_usecs = fields['running_usecs']
+        cmd_name = fields['cmd_name']
+
+        self.imap_complete_commands.labels(user, reply_state).inc()
+        self.imap_bytes_in.labels(user).inc(bytes_in)
+        self.imap_bytes_out.labels(user).inc(bytes_out)
+        self.imap_running_usecs.labels(user, cmd_name).inc(running_usecs)
+
+    def lmtp_handler(self, json_data):
+        logging.info("Within handler {}: {}".format(self.lmtp_handler.__name__, json_data))
+        fields = json_data['fields']
+
+        user = fields['user']
+        message_size = fields['message_size']
+
+        self.lmtp_complete_commands.labels(user).inc()
+        self.lmtp_received_messages_size.labels(user).inc(message_size)
+
+    def sieve_handler(self, json_data):
+        logging.info("Within handler {}: {}".format(self.sieve_handler.__name__, json_data))
+        pass
+
+
+class DovecotHTTPHandler(MetricsHandler):
+    """
+    This is a prototype of dovecot's metrics exporter.
+
+    You can enable debugging by the adding DEXPORTER_DEBUG variable into yours environment
+    or simply in command line before exporter name
+    """
+    HELPER = DovecotMetricsHandler()
+
+    event_switch = {
+        'imap': lambda json_data: DovecotHTTPHandler.HELPER.imap_handler(json_data),
+        'mail': lambda json_data: DovecotHTTPHandler.HELPER.lmtp_handler(json_data),
+        'sieve': lambda json_data: DovecotHTTPHandler.HELPER.sieve_handler(json_data),
+        'auth': lambda json_data: DovecotHTTPHandler.HELPER.auth_handler(json_data),
+    }
+
+    # it's very complicated thing below, but I'll keep it just in case
+    """
+    def __init__(self, request: bytes, client_address: Tuple[str, int], server: socketserver.BaseServer):
+        self.arg = self.get_args()
+        super().__init__(request, client_address, server)
+    """
     def _set_headers(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
+
+    def _get_event_type(self, event_fqn):
+        return event_fqn.split('_')[0]
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-length']))
@@ -66,31 +103,24 @@ class DovecotHTTPHandler(MetricsHandler):
 
         # prepare needed fields
         logging.info("It's whole data: {}".format(data))
-        event = data['event']
+        event_type = self._get_event_type(data['event'])
+        logging.info("Event type is: {}".format(event_type))
 
-        logging.info(event)
         fields = data['fields']
         user = fields['user']
 
-        logging.info("It's data: {}".format(fields))
+        # we may use fqdn in some metrics, because a lot of users exist
+        fqdn = user.split('@')[1]
 
-        if event == 'imap_command_finished':
-            reply_state = fields['tagged_reply_state']
-            bytes_in = fields['bytes_in']
-            bytes_out = fields['bytes_out']
-            running_usecs = fields['running_usecs']
-            cmd_name = fields['cmd_name']
+        logging.info("It's a useful data: {}".format(fields))
 
-            self.imap_complete_commands.labels(user, reply_state).inc()
-            self.imap_bytes_in.labels(user).inc(bytes_in)
-            self.imap_bytes_out.labels(user).inc(bytes_out)
-            self.imap_running_usecs.labels(user, cmd_name).inc(running_usecs)
+        # self.event_switch[event](data)
 
-        if event == 'mail_delivery_finished':
-            message_size = fields['message_size']
+        event_handler = [value for key, value in self.event_switch.items() if event_type in key.lower()]
+        logging.info(dir(event_handler))
+        logging.info("event_handler is {}: ".format(type(event_handler)))
 
-            self.lmtp_complete_commands.labels(user).inc()
-            self.lmtp_received_messages_size.labels(user).inc(message_size)
+        event_handler[0](data)
 
     def do_GET(self):
         endpoint = urlparse(self.path).path
@@ -110,7 +140,8 @@ def main():
     update_period = int(config['main']['update_period'])
 
     http_server = HTTPServer((address, port), DovecotHTTPHandler)
-    # logging.basicConfig(level=logging.INFO)
+    if os.getenv('DEXPORTER_DEBUG') is not None:
+        logging.basicConfig(level=logging.INFO)
     try:
         http_server.serve_forever(update_period)
     except KeyboardInterrupt:
