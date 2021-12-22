@@ -1,0 +1,10 @@
+version: '2'
+
+services:
+  dovecot_exporter:
+    build:
+      context: . 
+    volumes:
+      - "./conf:/etc/dovecot_exporter"
+    ports:
+      - "8888:8000"
